@@ -1,4 +1,5 @@
-﻿using GraphQL.Types;
+﻿
+using GraphQL.Types;
 using System.Data;
 using GraphQL;
 

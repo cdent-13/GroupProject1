@@ -12,6 +12,7 @@ using System.Xml.Xsl;
 using System.Runtime.InteropServices;
 using System.Web;
 using VulnerableWebApplication.VLAModel;
+using System.Reflection.Metadata.Ecma335;
 
 
 namespace VulnerableWebApplication.VLAController
@@ -30,10 +31,13 @@ namespace VulnerableWebApplication.VLAController
             /*
             Retourne le contenu du fichier correspondant à la langue choisie par l'utilisateur
             */
-            if (FileName.IsNullOrEmpty()) FileName = "francais";
-            while (FileName.Contains("../") || FileName.Contains("..\\")) FileName = FileName.Replace("../", "").Replace("..\\", "");
 
-            return Results.Ok(File.ReadAllText(FileName));
+            // ! Group 1 fix: File Traversal
+            string basePath = Path.GetFullPath("Languages");
+            string fullPath = Path.Combine(basePath, FileName);
+
+            if (!fullPath.StartsWith(basePath)) return Results.Unauthorized();
+            return Results.Ok(File.ReadAllText(fullPath));
         }
 
         public static object VulnerableDeserialize(string Json)
@@ -42,29 +46,64 @@ namespace VulnerableWebApplication.VLAController
             Deserialise les données JSON passées en paramètre.
             On enregistre les objets "employé" valides dans un fichier en lecture seule
             */
-            string NewId = "-1";
-            string HaveToBeEmpty = string.Empty;
-            string ROFile = "NewEmployees.txt";
+            string newId = "-1";
+            string bufferValidationResult = string.Empty;
+            string readOnlyFile = "NewEmployees.txt";
 
-            if (!File.Exists(ROFile)) File.Create(ROFile).Dispose();
-            File.SetAttributes(ROFile, FileAttributes.ReadOnly);
-
-            JsonConvert.DeserializeObject<object>(Json, new JsonSerializerSettings() { TypeNameHandling = TypeNameHandling.All });            
-            Employee NewEmployee = JsonConvert.DeserializeObject<Employee>(Json);
-
-            if (NewEmployee != null && !NewEmployee.Address.IsNullOrEmpty() && !NewEmployee.Id.IsNullOrEmpty()) 
+            // Ensure the file exists and is set to read-only
+            if (!File.Exists(readOnlyFile))
             {
-                HaveToBeEmpty = VulnerableBuffer(NewEmployee.Address);
-                if (HaveToBeEmpty.IsNullOrEmpty())
-                {
-                    NewId = VulnerableCodeExecution(NewEmployee.Id);
-                    File.SetAttributes(ROFile, FileAttributes.Normal);
-                    using (StreamWriter sw = new StreamWriter(ROFile, true)) sw.Write(JsonConvert.SerializeObject(NewEmployee, Newtonsoft.Json.Formatting.Indented));
-                    File.SetAttributes(ROFile, FileAttributes.ReadOnly);
-                }
+                File.Create(readOnlyFile).Dispose();
             }
+            File.SetAttributes(readOnlyFile, FileAttributes.ReadOnly);
 
-            return Results.Ok(Newtonsoft.Json.JsonConvert.SerializeObject(new List<object> { File.GetAttributes(ROFile).ToString(), NewId, HaveToBeEmpty.IsNullOrEmpty() }));
+            try
+            {
+                // Group 1 Fix: Use secure deserialization
+                Employee newEmployee = JsonConvert.DeserializeObject<Employee>(Json, new JsonSerializerSettings
+                {
+                    TypeNameHandling = TypeNameHandling.None
+                });
+
+                if (newEmployee != null && !string.IsNullOrEmpty(newEmployee.Address) && !string.IsNullOrEmpty(newEmployee.Id))
+                {
+                    // Validate address buffer
+                    bufferValidationResult = ValidateBuffer(newEmployee.Address);
+
+                    if (string.IsNullOrEmpty(bufferValidationResult))
+                    {
+                        // Securely process the ID
+                        newId = SecureCodeExecution(newEmployee.Id);
+
+                        // Write employee to the file
+                        File.SetAttributes(readOnlyFile, FileAttributes.Normal);
+                        using (StreamWriter sw = new StreamWriter(readOnlyFile, true))
+                        {
+                            sw.Write(JsonConvert.SerializeObject(newEmployee, Newtonsoft.Json.Formatting.Indented));
+                        }
+                        File.SetAttributes(readOnlyFile, FileAttributes.ReadOnly);
+                    }
+                }
+
+                return Results.Ok(new
+                {
+                    FileAttributes = File.GetAttributes(readOnlyFile).ToString(),
+                    NewId = newId,
+                    IsBufferValid = string.IsNullOrEmpty(bufferValidationResult)
+                });
+            }
+            catch (JsonException jsonEx)
+            {
+                // Log and handle JSON errors
+                Console.Error.WriteLine($"JSON deserialization error: {jsonEx.Message}");
+                return Results.BadRequest("Invalid JSON format.");
+            }
+            catch (Exception ex)
+            {
+                // Log and handle unexpected errors
+                Console.Error.WriteLine($"Unexpected error: {ex.Message}");
+                return Results.StatusCode(500, "Internal server error.");
+            }
         }
 
         public static string VulnerableXmlParser(string Xml)
@@ -89,8 +128,9 @@ namespace VulnerableWebApplication.VLAController
             catch (Exception ex)
             {
                 XmlReaderSettings ReaderSettings = new XmlReaderSettings();
-                ReaderSettings.DtdProcessing = DtdProcessing.Parse;
-                ReaderSettings.XmlResolver = new XmlUrlResolver();
+                // ! Group 1 fix : Disable DTD processing / XMLK Enternal Entitiy Injection
+                ReaderSettings.DtdProcessing = DtdProcessing.Prohibit;
+                ReaderSettings.XmlResolver = null;
                 ReaderSettings.MaxCharactersFromEntities = 6000;
 
                 using (MemoryStream stream = new MemoryStream(Encoding.UTF8.GetBytes(Xml)))
@@ -165,7 +205,9 @@ namespace VulnerableWebApplication.VLAController
                 Cmd.StartInfo.UseShellExecute = false;
                 Cmd.Start();
                 Cmd.WaitForExit(200);
-                Cmd.StandardInput.WriteLine("nslookup " + UserStr);
+                // ! Group 1 fix: Command Injection
+                if (!Regex.IsMatch(UserStr, @"^[a-zA-Z0-9.-]+$")) throw new ArgumentException("Invalid input.");
+                Process.Start(new ProcessStartInfo("nslookup", UserStr) { RedirectStandardOutput = true }).StandardOutput.ReadToEnd();
                 Cmd.StandardInput.Flush();
                 Cmd.StandardInput.Close();
 
@@ -191,13 +233,12 @@ namespace VulnerableWebApplication.VLAController
             /*
             Retourne un nouvel Id
             */
-            string Result = string.Empty;
-            if (UserStr.Length < 40 && !UserStr.Contains("class") && !UserStr.Contains("using"))
+            if (userInput.Length > 50)
             {
-                Result = CSharpScript.EvaluateAsync($"System.Math.Pow(2, {UserStr})")?.Result?.ToString();
+                return "Input exceeds maximum allowed length.";
             }
 
-            return Result;
+            return string.Empty;
         }
 
         public static async Task<IResult> VulnerableHandleFileUpload(IFormFile UserFile, string Header)
@@ -206,6 +247,8 @@ namespace VulnerableWebApplication.VLAController
             Permets l'upload de fichier de type SVG
             */
             if (!Header.Contains("10.10.10.256")) return Results.Unauthorized();
+            // Group 1 fix: improper file type validation
+            if (UserFile.ContentType != "image/svg+xml") throw new InvalidOperationException("Invalid file type.");
 
             if (UserFile.FileName.EndsWith(".svg")) 
             {

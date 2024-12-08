@@ -39,7 +39,8 @@ namespace VulnerableWebApplication.VLAIdentity
 
             VLAController.VLAController.VulnerableLogs("login attempt for:\n" + User + "\n" + Passwd + "\n", LogFile);
             var DataSet = VLAModel.Data.GetDataSet();
-            var Result = DataSet.Tables[0].Select("Passwd = '" + Hash + "' and User = '" + User + "'");
+            // ! Group 1 fix: SQL Injection
+            var result = dataSet.Tables[0].AsEnumerable().Where(row => row.Field<string>("Passwd") == Hash && row.Field<string>("User") == User).ToArray();
             var userRow = DataSet.Tables[0].AsEnumerable().FirstOrDefault(row => row.Field<string>("User") == User && row.Field<int>("IsAdmin") == 1);
 
             return Result.Length > 0 ? Results.Ok(VulnerableGenerateToken(User, userRow != null)) : Results.Unauthorized();
@@ -71,7 +72,18 @@ namespace VulnerableWebApplication.VLAIdentity
             var TokenHandler = new JwtSecurityTokenHandler();
             var Key = Encoding.ASCII.GetBytes(Secret);
             bool Result = true;
-            Token = Token.Substring("Bearer ".Length);
+            // ! Group 1 fix: weak token validation
+            try
+            {
+                if (!token.StartsWith("Bearer ")) throw new SecurityException("Invalid token format.");
+                Token = token.Substring("Bearer ".Length);
+                var jwt = tokenHandler.ReadJwtToken(token);
+            }
+            catch (Exception ex)
+            {
+                throw new FormatException("Invalid token format.");
+            }
+
 
             try
             {
